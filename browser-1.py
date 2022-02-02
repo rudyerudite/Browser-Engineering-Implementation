@@ -2,7 +2,7 @@
 '''
 Pending implementations:                                                         Extra:
 1. Cache control (1)                                                             1. Handling quoted attributes (4)      
-2. Redirect to another page (1)
+2. Redirect to another page (1)                                            not clear with TagSelector/ Descendant
 3. Compression (1)
 4. View Source Code (1) (4)
 5. &lt; &gt; --> replace with symbols (1)
@@ -37,6 +37,14 @@ BLOCK_ELEMENTS = [
     "figcaption", "main", "div", "table", "form", "fieldset",
     "legend", "details", "summary"
 ]
+
+# allowed properties which a child can inherit from parent; bg-color not allowed...
+INHERITED_PROPERTIES = {
+    "font-size": "16px",
+    "font-style": "normal",
+    "font-weight": "normal",
+    "color": "black",
+}
 # building the HTML document tree
 # the normal text would have a tag as parent (?)
 class Text:
@@ -49,14 +57,144 @@ class Text:
     def __repr__(self):
         return repr(self.text)
 
+# CSS limited to bg colors...
+# CSS maintains a cascade order to determine which rules take priority, and when one rule overrides another. 
+# Browser declarations < User normal declarations < Author normal declarations < Author important declarations < User important declarations
+        
+# selecting properties wrt a tag; p selecting properties of <p> tag
+class TagSelector:
+    def __init__(self, tag):
+        self.tag = tag
+        # cascade order as per tag, more priority to self rules (?)
+        self.priority = 1
+    
+    def matches(self, node):
+        return isinstance(node, Element) and self.tag == node.tag
+
+class DescendantSelector:
+    def __init__(self, ancestor, descendant):
+        self.ancestor = ancestor
+        self.descendant = descendant
+        self.priority = ancestor.priority + descendant.priority
+    
+    def matches(self, node):
+        if not self.descendant.matches(node): return False
+        while node.parent:
+            if self.ancestor.matches(node.parent): return True
+            node = node.parent
+        return False
+
+    
+
+
+# CSS parser for parsing the property:value pair in attributes
+class CSSParser:
+    def __init__(self, s):
+    # text being parsed
+        self.s = s
+    # current position 
+        self.i = 0
+    
+    # parsing whitespaces
+    def whitespace(self):
+        while self.i < len(self.s) and self.s[self.i].isspace():
+            self.i += 1
+
+    # parsing the properties:(whitespace)value [property names (which use letters and the dash), 
+    #                               numbers (which use the minus sign, numbers, periods), 
+    #                               units (the percent sign), and colors (which use the hash sign).]
+    def word(self):
+        start = self.i
+        while self.i < len(self.s):
+            if self.s[self.i].isalnum() or self.s[self.i] in "#-.%":
+                self.i += 1
+            else:
+                break
+        assert self.i > start
+        return self.s[start:self.i]
+
+# to check for a punctuation/literal character
+    def literal(self, literal):
+        assert self.i < len(self.s) and self.s[self.i] == literal
+        self.i += 1
+
+    def pair(self):
+        prop = self.word()
+        self.whitespace() #not required?
+        self.literal(":")
+        self.whitespace()
+        val = self.word()
+        return prop.lower(), val
+
+# creating a dictionary of all the properties
+    def body(self): # LL(1) parser ??
+        pairs = {}
+        while self.i < len(self.s) and self.s[self.i] != "}":
+            try:
+                prop, val = self.pair()
+                pairs[prop.lower()] = val
+                self.whitespace()
+                self.literal(";")
+                self.whitespace()
+            except AssertionError:
+            # moving ahead with the next property if there's some error in b/w
+                self.i += 1
+                why = self.ignore_until([";","}"]) 
+                if why == ";":
+                    self.literal(";")
+                    self.whitespace()
+                else:
+                    break
+        return pairs
+   
+    # used for ignoring program errors?
+    def ignore_until(self, chars):
+        while self.i < len(self.s):
+            if self.s[self.i] in chars:
+                return self.s[self.i]
+            else:
+                self.i += 1
+
+    def selector(self):
+        out = TagSelector(self.word().lower())
+        self.whitespace()
+        while self.i < len(self.s) and self.s[self.i] != "{":
+            tag = self.word()
+            descendant = TagSelector(tag.lower())
+            out = DescendantSelector(out, descendant)
+            self.whitespace()
+        return out
+
+    def parse(self):
+        rules = []
+        while self.i < len(self.s):
+            try:
+                self.whitespace()
+                selector = self.selector()
+                self.literal("{")
+                self.whitespace()
+                body = self.body()
+                self.literal("}")
+                rules.append((selector, body))
+            except AssertionError:
+                self.i += 1
+                why = self.ignore_until(["}"])
+                if why == "}":
+                    self.literal("}")
+                    self.whitespace()
+                else:
+                    break
+        return rules
+
 # Implement the DrawText command
 class DrawText:
-    def __init__(self, x1, y1, text, font):
+    def __init__(self, x1, y1, text, font,color):
         self.top = y1
         self.left = x1
         self.text = text
         self.font = font
         self.bottom = y1 + font.metrics("linespace")
+        self.color = color
     
     def execute(self, scroll, canvas):
         canvas.create_text(
@@ -64,6 +202,7 @@ class DrawText:
             text=self.text,
             font=self.font,
             anchor='nw',
+            fill=self.color,
         )
 
 # Ipmlement the DrawRect command :  background to the text
@@ -300,25 +439,31 @@ class InlineLayout:
     def flush(self):
         #print(self.line)
         if not self.line: return
-        metrics = [font.metrics() for x, word, font in self.line]
+        metrics = [font.metrics() for x, word, font,color in self.line]
         max_ascent = max([metric["ascent"] for metric in metrics])
         baseline = self.cursor_y + 1.25 * max_ascent
-        for x, word, font in self.line:
+        for x, word, font,color in self.line:
             y = baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font))
+            self.display_list.append((x, y, word, font,color))
         self.cursor_x = self.x
         self.line = []
         max_descent = max([metric["descent"] for metric in metrics])
         self.cursor_y = baseline + 1.25 * max_descent
 
     def paint(self, display_list):
-        
-       for x, y, word, font in self.display_list:
-            if isinstance(self.node, Element) and self.node.tag == "pre":
-                x2, y2 = self.x + self.width, self.y + self.height
-                rect = DrawRect(self.x, self.y, x2, y2, "gray")
-                display_list.append(rect)
-            display_list.append(DrawText(x, y, word, font))
+        bgcolor = self.node.style.get("background-color","transparent")
+
+        if bgcolor != "transparent":
+            x2, y2 = self.x + self.width, self.y + self.height
+            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
+            display_list.append(rect)
+
+        for x, y, word, font,color in self.display_list:
+            #if isinstance(self.node, Element) and self.node.tag == "pre":
+            #    x2, y2 = self.x + self.width, self.y + self.height
+            #    rect = DrawRect(self.x, self.y, x2, y2, "gray")
+            #    display_list.append(rect)
+            display_list.append(DrawText(x, y, word, font,color))
 
     
     def layout(self):
@@ -343,7 +488,8 @@ class InlineLayout:
         self.flush()
         self.height = self.cursor_y - self.y
     
-    def open_tag(self, tag):
+
+    def open_tag(self, tag): # obsolete, remove
         if tag == "i":
             self.style = "italic"
         elif tag == "b":
@@ -362,7 +508,7 @@ class InlineLayout:
         #    self.cursor_y += VSTEP + self.font.metrics("ascent") * 1.75
             self.weight = "bold"
     
-    def close_tag(self,tag):
+    def close_tag(self,tag): # obsolete, remove
         # print("here...{}".format(tag))
         if tag == "i":
             self.style = "roman"
@@ -387,25 +533,27 @@ class InlineLayout:
             self.weight = "normal"
             #title = False'''
 
-    def recurse(self, tree):
+    def recurse(self, node):
 
-        if isinstance(tree, Text):
-            self.text(tree)
+        if isinstance(node, Text):
+            self.text(node)
         else:
-            self.open_tag(tree.tag)
-            for child in tree.children:
+            if node.tag == "br":
+                self.flush()
+            for child in node.children:
                 self.recurse(child)
-            self.close_tag(tree.tag)
-    
 
-    def text(self,tok):
+    def text(self,node):
         #print(tok.text)
-        font_ = tkinter.font.Font(
-            size=self.size,
-            weight=self.weight,
-            slant=self.style,
-        )
-        for c in tok.text.split(): #iterationg thru each 'word', removes newlines
+        color = node.style["color"]
+        weight = node.style["font-weight"]
+        style = node.style["font-style"]
+        if style == "normal": #conversion to Tk format
+            style = "roman"
+        size = int(float(node.style["font-size"][:-2]) * .75)
+        font_ = get_font(size, weight, style)
+
+        for c in node.text.split(): #iterationg thru each 'word', removes newlines
             # slows down the browser when computed for every word
             # space = self.font.measure(c) --> measuring the width of text
             self.font = font_
@@ -414,7 +562,7 @@ class InlineLayout:
             if (self.cursor_x + space) >= WIDTH - HSTEP:
             # moving to the next line
                 self.flush()
-            self.line.append((self.cursor_x, c, font_))
+            self.line.append((self.cursor_x, c, font_,color))
             #self.display_list.append((self.cursor_x, self.cursor_y, c,font_))
             self.cursor_x += space + font_.measure(" ")
            
@@ -425,7 +573,7 @@ class Browser:
         # window -- where the canvas will be displayed
         self.window = tkinter.Tk()
         # to create canvas inside the window (specifications)
-        self.canvas = tkinter.Canvas(self.window, width=WIDTH,height=HEIGHT)
+        self.canvas = tkinter.Canvas(self.window, width=WIDTH,height=HEIGHT,bg="white")
         # to position canvas inside window
         self.canvas.pack()
         self.scroll = 0
@@ -435,7 +583,10 @@ class Browser:
         self.display_list = []
         #self.window.bind("<MouseWheel>",self.on_mousewheel)
          #weight = bold, slant =italics
+        with open("C:\\Users\\Shruti Dixit\\Documents\\Browser-Code\\broswer.css") as f:
+            self.default_style_sheet = CSSParser(f.read()).parse()
     
+
     def scrolldown(self,something):
         max_y = self.document.height - HEIGHT
         self.scroll = min(self.scroll + SCROLL_STEP, max_y)
@@ -456,6 +607,24 @@ class Browser:
     def load(self, hostname):
         headers,body = request(hostname)
         self.nodes = HTMLParser(body).parse()
+        # copy() function creates a shallow copy
+        rules = self.default_style_sheet.copy()
+        
+        # browser will have to find the link for the sheets <link rel="stylesheet" href="/main.css"> and apply them
+        links = [node.attributes["href"]
+             for node in tree_to_list(self.nodes, [])
+             if isinstance(node, Element)
+             and node.tag == "link"
+             and "href" in node.attributes
+             and node.attributes.get("rel") == "stylesheet"]
+
+        for link in links:
+            try:
+                header, body = request(resolve_url(link, hostname))
+            except:
+                continue
+        rules.extend(CSSParser(body).parse())
+        style(self.nodes,sorted(rules, key=cascade_priority))
         #print_tree(self.nodes)
         self.document =  DocumentLayout(self.nodes)
         self.document.layout()
@@ -475,6 +644,11 @@ def layout_mode(node):
         return "inline"
     else:
         return "block"  
+
+def cascade_priority(rule):
+    # body contains the exact attributes, selector =  Tag/Descendant object
+    selector, body = rule
+    return selector.priority
 
 def print_tree(node, indent=0):
     # indent being used for just formatting
@@ -527,6 +701,81 @@ def request(hostname):
     body = response.read()
     s.close()
     return headers,body
+
+def style(node,rules):
+    node.style = {}
+
+    # setting inherited properties in case 
+    for property, default_value in INHERITED_PROPERTIES.items():
+        if node.parent:
+            node.style[property] = node.parent.style[property]
+        else:
+            node.style[property] = default_value
+
+    for selector, body in rules:
+        if not selector.matches(node): continue
+        for property, value in body.items():
+            computed_value = compute_style(node, property, value)
+            if not computed_value: continue #font-size returns None if wrong format
+            node.style[property] = computed_value
+
+    if isinstance(node, Element) and "style" in node.attributes:
+        pairs = CSSParser(node.attributes["style"]).body()
+        for property, value in pairs.items():
+            node.style[property] = value
+
+    for child in node.children:
+        style(child,rules)
+
+# re-sizing the font-size as per %age and px; computed font-size is converted to px 
+# %age scenarios: the size of the font is %age time more
+def compute_style(node, property, value):
+    if property == "font-size":
+        if value.endswith("px"):
+            return value
+        elif value.endswith("%"):
+            if node.parent:
+                parent_font_size = node.parent.style["font-size"]
+            else:
+                parent_font_size = INHERITED_PROPERTIES["font-size"]
+            node_pct = float(value[:-1]) / 100
+            parent_px = float(parent_font_size[:-2])
+            return str(node_pct * parent_px) + "px"
+        else:
+            return None
+    else:
+        return value
+
+def tree_to_list(tree, list):
+    list.append(tree)
+    for child in tree.children:
+        tree_to_list(child, list)
+    return list
+
+# returning the full URL of the stylesheet
+def resolve_url(url, current):
+    # for normal URLs
+    if "://" in url:
+        return url
+    
+    # for host-relative URLs
+    elif url.startswith("/"):
+        scheme, hostpath = current.split("://", 1)
+        host, oldpath = hostpath.split("/", 1)
+        return scheme + "://" + host + url
+
+    # for path-relative URLs (change to specific directory)
+    else:
+        dir, _ = current.rsplit("/", 1)
+        while url.startswith("../"):
+            url = url[3:]
+            # check for slashes in scheme ://
+            if dir.count("/") == 2: continue
+            dir, _ = dir.rsplit("/", 1)
+        return dir + "/" + url
+    
+
+    
 
 if __name__ == "__main__":
     import sys
