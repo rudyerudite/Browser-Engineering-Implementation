@@ -3,7 +3,7 @@
 Pending implementations:                                                         Extra:
 1. Cache control (1)                                                             1. Handling quoted attributes (4)      
 2. Redirect to another page (1)                                            not clear with TagSelector/ Descendant
-3. Compression (1)
+3. Compression (1)                                                                
 4. View Source Code (1) (4)
 5. &lt; &gt; --> replace with symbols (1)
 6. enable mouse scroll (2)
@@ -11,6 +11,25 @@ Pending implementations:                                                        
 8. handling data in script tag (4)
 9. Handling comments (4)   
 10. Implement a scrolldown bar,bullets to list items (5)                                      
+'''
+
+''' Layout Tree
+DocumentLayout
+  BlockLayout (html element)                    
+    InlineLayout (body element)
+      LineLayout (first line of text)
+        TextLayout ("Here")
+        TextLayout ("is")
+        TextLayout ("some")
+        TextLayout ("text")
+        TextLayout ("that")
+        TextLayout ("is")
+    LineLayout (second line of text)
+        TextLayout ("spread")
+        TextLayout ("across")
+        TextLayout ("multiple")
+        TextLayout ("lines")
+
 '''
 import socket
 import ssl
@@ -434,21 +453,14 @@ class InlineLayout:
         self.previous = previous
         self.children = []
         
-        
-
-    def flush(self):
-        #print(self.line)
-        if not self.line: return
-        metrics = [font.metrics() for x, word, font,color in self.line]
-        max_ascent = max([metric["ascent"] for metric in metrics])
-        baseline = self.cursor_y + 1.25 * max_ascent
-        for x, word, font,color in self.line:
-            y = baseline - font.metrics("ascent")
-            self.display_list.append((x, y, word, font,color))
+    # creating a new line
+    def new_line(self):
+        self.previous_word = None
         self.cursor_x = self.x
-        self.line = []
-        max_descent = max([metric["descent"] for metric in metrics])
-        self.cursor_y = baseline + 1.25 * max_descent
+        last_line = self.children[-1] if self.children else None
+        new_line = LineLayout(self.node, self, last_line)
+        self.children.append(new_line)
+
 
     def paint(self, display_list):
         bgcolor = self.node.style.get("background-color","transparent")
@@ -458,12 +470,9 @@ class InlineLayout:
             rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
             display_list.append(rect)
 
-        for x, y, word, font,color in self.display_list:
-            #if isinstance(self.node, Element) and self.node.tag == "pre":
-            #    x2, y2 = self.x + self.width, self.y + self.height
-            #    rect = DrawRect(self.x, self.y, x2, y2, "gray")
-            #    display_list.append(rect)
-            display_list.append(DrawText(x, y, word, font,color))
+
+        for child in self.children:
+            child.paint(display_list)
 
     
     def layout(self):
@@ -476,76 +485,24 @@ class InlineLayout:
         else:
             self.y = self.parent.y
 
-        self.display_list = []
-        self.line = []
-        self.cursor_x = self.x #HSTEP
-        self.cursor_y = self.y #VSTEP
-        self.weight = "normal"
-        self.style = "roman"
-        self.size = 16
-        self.font = tkinter.font.Font(family="Arial",size=self.size,weight=self.weight,slant=self.style)
+        self.new_line()        
         self.recurse(self.node)
-        self.flush()
-        self.height = self.cursor_y - self.y
-    
+        for line in self.children:
+            line.layout()
+        self.height = sum([line.height for line in self.children])
 
-    def open_tag(self, tag): # obsolete, remove
-        if tag == "i":
-            self.style = "italic"
-        elif tag == "b":
-            self.weight = "bold"
-        elif tag == "small":
-            self.size -= 2
-        elif tag == "big":
-            self.size += 4
-        elif tag == "br":
-            self.flush()
-        #    self.cursor_y += self.font.metrics("linespace") * 1.25 
-        #    self.cursor_x = self.parent.x
-        elif 'h1' in tag: #check attributes 'h1 class="title"': title true
-            #self.flush()
-        #    self.cursor_x = HSTEP + WIDTH//4
-        #    self.cursor_y += VSTEP + self.font.metrics("ascent") * 1.75
-            self.weight = "bold"
-    
-    def close_tag(self,tag): # obsolete, remove
-        # print("here...{}".format(tag))
-        if tag == "i":
-            self.style = "roman"
-        elif tag == "b":
-            self.weight = "normal"
-        # as the browser is limited to parsing html we use "small" and "big" here which is replaced by CSS commonly
-        # formatting as in chapter 3 skipped for big/small, implementation of self.flush()
-        elif tag == "small":
-            self.size += 2
-        elif tag == "big":
-            self.size -= 4
-        elif tag == "p":
-            self.flush()
-            self.cursor_y += VSTEP
-        #    self.cursor_y += self.y + self.font.metrics("linespace") * 1.25 
-        #    self.cursor_x = self.parent.x
-        elif "h1" in tag: 
-            #self.flush()
-            #and title == True
-        #    self.cursor_x = HSTEP 
-        #    self.cursor_y += VSTEP + self.font.metrics("ascent") * 1.75 
-            self.weight = "normal"
-            #title = False'''
 
     def recurse(self, node):
-
         if isinstance(node, Text):
             self.text(node)
         else:
             if node.tag == "br":
-                self.flush()
+                self.new_line()
             for child in node.children:
                 self.recurse(child)
 
     def text(self,node):
         #print(tok.text)
-        color = node.style["color"]
         weight = node.style["font-weight"]
         style = node.style["font-style"]
         if style == "normal": #conversion to Tk format
@@ -554,17 +511,90 @@ class InlineLayout:
         font_ = get_font(size, weight, style)
 
         for c in node.text.split(): #iterationg thru each 'word', removes newlines
-            # slows down the browser when computed for every word
             # space = self.font.measure(c) --> measuring the width of text
             self.font = font_
             space = font_.measure(c)
             # checking if complete word can fit in the line
-            if (self.cursor_x + space) >= WIDTH - HSTEP:
+            if (self.cursor_x + space) >= self.width - HSTEP:
             # moving to the next line
-                self.flush()
-            self.line.append((self.cursor_x, c, font_,color))
+                self.new_line()
+            line = self.children[-1]
+            text = TextLayout(node, c, line, self.previous_word)
+            line.children.append(text)
+            self.previous_word = text
             #self.display_list.append((self.cursor_x, self.cursor_y, c,font_))
             self.cursor_x += space + font_.measure(" ")
+
+# for each line break
+# children of InlineLayout (body element)
+class LineLayout:
+    def __init__(self, node, parent, previous):
+        self.node = node
+        self.parent = parent
+        self.previous = previous
+        self.children = []
+
+    def layout(self):
+        self.width = self.parent.width
+        self.x = self.parent.x
+
+        if self.previous:
+            self.y = self.previous.y + self.previous.height
+        else:
+            self.y = self.parent.y
+        
+
+        if not self.children:
+            self.height = 0
+            return
+        # laying out each word
+        for word in self.children:
+            word.layout()
+
+        max_ascent = max([word.font.metrics("ascent")
+                  for word in self.children])
+        baseline = self.y + 1.25 * max_ascent
+        # computing the y field
+        for word in self.children:
+            word.y = baseline - word.font.metrics("ascent")
+        max_descent = max([word.font.metrics("descent") for word in self.children])
+        self.height = 1.25 * (max_ascent + max_descent)
+
+    def paint(self, display_list):
+        for child in self.children:
+            child.paint(display_list)
+
+    
+
+# for each "word"
+# children on LineLayout
+class TextLayout:
+    def __init__(self, node, word, parent, previous):
+        self.node = node
+        self.word = word
+        self.children = []
+        self.parent = parent
+        self.previous = previous
+
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal": style = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * .75)
+        self.font = get_font(size, weight, style)
+        # positioning each word that is a part of a line (y already computed)
+        self.width = self.font.measure(self.word)
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + space + self.previous.width
+        else:
+            self.x = self.parent.x
+
+        self.height = self.font.metrics("linespace")
+
+    def paint(self, display_list):
+        color = self.node.style["color"]
+        display_list.append(DrawText(self.x, self.y, self.word, self.font, color))
            
 
 class Browser:
@@ -580,17 +610,47 @@ class Browser:
         # self.scrolldown --> event handler, called when down key is pressed
         # we are binding a function to a key (Tk allows us to do that)
         self.window.bind("<Down>", self.scrolldown)
+        # left click bind
+        self.window.bind("<Button-1>", self.click)
         self.display_list = []
+        self.url = None
         #self.window.bind("<MouseWheel>",self.on_mousewheel)
          #weight = bold, slant =italics
-        with open("C:\\Users\\Shruti Dixit\\Documents\\Browser-Code\\broswer.css") as f:
+        with open("C:\\Users\\Shruti Dixit\\Documents\\Browser-Code\\browser.css") as f:
             self.default_style_sheet = CSSParser(f.read()).parse()
     
 
-    def scrolldown(self,something):
+    def scrolldown(self,eventobject):
         max_y = self.document.height - HEIGHT
         self.scroll = min(self.scroll + SCROLL_STEP, max_y)
         self.draw()
+
+    # event handler is passed an event object
+    def click(self, e):
+        # y coordinates are relative to the browser window; top-left
+        x, y = e.x, e.y
+        # adding current scroll value
+        y += self.scroll
+        # finding a link in the current area where the link is clicked
+        objs = [obj for obj in tree_to_list(self.document, [])
+                if obj.x <= x < obj.x + obj.width
+                and obj.y <= y < obj.y + obj.height]
+        if not objs: 
+            return
+        print(objs)
+        elt = objs[-1].node
+        print(elt)
+
+        # finding the URL of the text element... climbing back the HTML tree until the tag is found
+        # implementing viewing the pages of clicked links
+        while elt:
+            if isinstance(elt, Text):
+                pass
+            elif elt.tag == "a" and "href" in elt.attributes:
+                url = resolve_url(elt.attributes["href"], self.url)
+                return self.load(url)
+            elt = elt.parent
+
 
 
     # rendering function
@@ -609,7 +669,7 @@ class Browser:
         self.nodes = HTMLParser(body).parse()
         # copy() function creates a shallow copy
         rules = self.default_style_sheet.copy()
-        
+        self.url = hostname
         # browser will have to find the link for the sheets <link rel="stylesheet" href="/main.css"> and apply them
         links = [node.attributes["href"]
              for node in tree_to_list(self.nodes, [])
