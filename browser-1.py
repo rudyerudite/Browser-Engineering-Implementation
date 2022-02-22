@@ -3,14 +3,18 @@
 Pending implementations:                                                         Extra:
 1. Cache control (1)                                                             1. Handling quoted attributes (4)      
 2. Redirect to another page (1)                                            not clear with TagSelector/ Descendant
-3. Compression (1)                                                                
+3. Compression (1)                                                               2. Check chapter 7 for good features 
 4. View Source Code (1) (4)
 5. &lt; &gt; --> replace with symbols (1)
 6. enable mouse scroll (2)
 7. Zooming (2)
 8. handling data in script tag (4)
 9. Handling comments (4)   
-10. Implement a scrolldown bar,bullets to list items (5)                                      
+10. Implement a scrolldown bar,bullets to list items (5)
+11. Forward button (7)
+12. Backspace when editing the URL (7)
+13. Visited Links (7)
+14. Search query (7)                                      
 '''
 
 ''' Layout Tree
@@ -31,16 +35,20 @@ DocumentLayout
         TextLayout ("lines")
 
 '''
+from platform import node
 import socket
-import ssl
 import tkinter
 import tkinter.font
+import urllib.parse
+
 
 # common monitor size
 WIDTH, HEIGHT = 800,600
 # page coordinates
 HSTEP, VSTEP = 13, 18
 SCROLL_STEP = 100
+INPUT_WIDTH_PX = 200
+CHROME_PX = 100
 # cache (tuple) to keep font style of each word so as to make the browser fast
 FONTS = {}
 SELF_CLOSING_TAGS = [
@@ -64,6 +72,10 @@ INHERITED_PROPERTIES = {
     "font-weight": "normal",
     "color": "black",
 }
+
+# cookies for same-site (same domain?)
+COOKIE_JAR = {}
+
 # building the HTML document tree
 # the normal text would have a tag as parent (?)
 class Text:
@@ -241,6 +253,50 @@ class DrawRect:
             width=0,
             fill=self.color,
         )
+# for the form fields
+class InputLayout:
+    def __init__(self, node, parent, previous):
+        self.node = node
+        self.children = []
+        self.parent = parent
+        self.previous = previous
+        self.x = None
+        self.y = None
+        self.width = None
+        self.height = None
+
+    def layout(self):
+        weight = self.node.style["font-weight"]
+        style = self.node.style["font-style"]
+        if style == "normal": style = "roman"
+        size = int(float(self.node.style["font-size"][:-2]) * .75)
+        self.font = get_font(size, weight, style)
+
+        self.width = INPUT_WIDTH_PX
+
+        if self.previous:
+            space = self.previous.font.measure(" ")
+            self.x = self.previous.x + space + self.previous.width
+        else:
+            self.x = self.parent.x
+
+        self.height = self.font.metrics("linespace")
+
+    def paint(self, display_list):
+        bgcolor = self.node.style.get("background-color",
+                                      "transparent")
+        if bgcolor != "transparent":
+            x2, y2 = self.x + self.width, self.y + self.height
+            rect = DrawRect(self.x, self.y, x2, y2, bgcolor)
+            display_list.append(rect)
+
+        if self.node.tag == "input":
+            text = self.node.attributes.get("value", "")
+        elif self.node.tag == "button":
+            text = self.node.children[0].text
+
+        color = self.node.style["color"]
+        display_list.append(DrawText(self.x, self.y, text, self.font, color))
 
 # root node of Layout: setting the properties of the main Document
 class DocumentLayout:
@@ -452,7 +508,12 @@ class InlineLayout:
         self.parent = parent
         self.previous = previous
         self.children = []
-        
+        self.x = None
+        self.y = None
+        self.width = None
+        self.height = None
+        self.display_list = None
+       
     # creating a new line
     def new_line(self):
         self.previous_word = None
@@ -473,6 +534,24 @@ class InlineLayout:
 
         for child in self.children:
             child.paint(display_list)
+
+    def get_font(self, node):
+        weight = node.style["font-weight"]
+        style = node.style["font-style"]
+        if style == "normal": style = "roman"
+        size = int(float(node.style["font-size"][:-2]) * .75)
+        return get_font(size, weight, style)
+    
+    def input(self, node):
+        w = INPUT_WIDTH_PX
+        if self.cursor_x + w > self.x + self.width:
+            self.new_line()
+        line = self.children[-1]
+        input = InputLayout(node, line, self.previous_word)
+        line.children.append(input)
+        self.previous_word = input
+        font = self.get_font(node)
+        self.cursor_x += w + font.measure(" ")
 
     
     def layout(self):
@@ -498,24 +577,21 @@ class InlineLayout:
         else:
             if node.tag == "br":
                 self.new_line()
-            for child in node.children:
-                self.recurse(child)
+            elif node.tag == "input" or node.tag == "button": #input elements have no children; button elms skip- included later
+                self.input(node)
+            else:
+                for child in node.children:
+                    self.recurse(child)
 
     def text(self,node):
         #print(tok.text)
-        weight = node.style["font-weight"]
-        style = node.style["font-style"]
-        if style == "normal": #conversion to Tk format
-            style = "roman"
-        size = int(float(node.style["font-size"][:-2]) * .75)
-        font_ = get_font(size, weight, style)
-
+        font_ = self.get_font(node)
         for c in node.text.split(): #iterationg thru each 'word', removes newlines
             # space = self.font.measure(c) --> measuring the width of text
-            self.font = font_
+            
             space = font_.measure(c)
             # checking if complete word can fit in the line
-            if (self.cursor_x + space) >= self.width - HSTEP:
+            if (self.cursor_x + space) > self.width + self.x:
             # moving to the next line
                 self.new_line()
             line = self.children[-1]
@@ -595,41 +671,34 @@ class TextLayout:
     def paint(self, display_list):
         color = self.node.style["color"]
         display_list.append(DrawText(self.x, self.y, self.word, self.font, color))
-           
 
-class Browser:
+class Tab:
     def __init__(self):
-        # creates a window
-        # window -- where the canvas will be displayed
-        self.window = tkinter.Tk()
-        # to create canvas inside the window (specifications)
-        self.canvas = tkinter.Canvas(self.window, width=WIDTH,height=HEIGHT,bg="white")
-        # to position canvas inside window
-        self.canvas.pack()
-        self.scroll = 0
-        # self.scrolldown --> event handler, called when down key is pressed
-        # we are binding a function to a key (Tk allows us to do that)
-        self.window.bind("<Down>", self.scrolldown)
-        # left click bind
-        self.window.bind("<Button-1>", self.click)
-        self.display_list = []
-        self.url = None
-        #self.window.bind("<MouseWheel>",self.on_mousewheel)
-         #weight = bold, slant =italics
         with open("C:\\Users\\Shruti Dixit\\Documents\\Browser-Code\\browser.css") as f:
             self.default_style_sheet = CSSParser(f.read()).parse()
+        
+        self.history = []
+        self.focus = None
+        self.url = None
+
+    def keypress(self, char):
+        if self.focus:
+            self.focus.attributes["value"] += char
+            self.render()
+
+
+    def go_back(self):
+        if len(self.history) > 1:
+            print(self.history)
+            self.history.pop()
+            back = self.history.pop()
+            self.load(back)
     
 
-    def scrolldown(self,eventobject):
-        max_y = self.document.height - HEIGHT
-        self.scroll = min(self.scroll + SCROLL_STEP, max_y)
-        self.draw()
-
-    # event handler is passed an event object
-    def click(self, e):
+    def click(self,x,y):
         # y coordinates are relative to the browser window; top-left
-        x, y = e.x, e.y
         # adding current scroll value
+        self.focus = None
         y += self.scroll
         # finding a link in the current area where the link is clicked
         objs = [obj for obj in tree_to_list(self.document, [])
@@ -649,26 +718,78 @@ class Browser:
             elif elt.tag == "a" and "href" in elt.attributes:
                 url = resolve_url(elt.attributes["href"], self.url)
                 return self.load(url)
+            elif elt.tag == "input":
+                elt.attributes["value"] = ""
+                self.focus = elt
+                return self.render()
+            elif elt.tag == "button":
+                #finding out which form does this button belong to while walking up the HTML tree
+                while elt:
+                    if elt.tag == "form" and "action" in elt.attributes:
+                        return self.submit_form(elt) # looking for the input elmnt, encoding, POST request
+                    elt = elt.parent
             elt = elt.parent
-
-
-
-    # rendering function
-    def draw(self): 
-        # draw is invoked each time we scroll; thus when we scroll the old text overlaps over the new one
-        # thus we delete the previous text before we show the new one
-        self.canvas.delete("all")
-        for cmd in self.display_list:
-            if cmd.top > self.scroll + HEIGHT: continue
-            if cmd.bottom < self.scroll: continue
-            cmd.execute(self.scroll, self.canvas)
-
     
-    def load(self, hostname):
-        headers,body = request(hostname)
+    def submit_form(self,elt):
+        inputs = [node for node in tree_to_list(elt, [])
+                  if isinstance(node, Element)
+                  and node.tag == "input"
+                  and "name" in node.attributes]
+        
+        body = ""
+        for input in inputs:
+            # urllib parse for replacing special characters with hex encoding
+    
+            name = urllib.parse.quote(input.attributes["name"])
+            value = urllib.parse.quote(input.attributes.get("value", ""))
+            body += "&" + name + "=" + value
+        body = body [1:]
+        # form action attribute pointing to the path
+        url = resolve_url(elt.attributes["action"], self.url)
+        self.load(url, body)
+           
+
+    def scrolldown(self):
+        max_y = self.document.height - (HEIGHT - CHROME_PX)
+        self.scroll = min(self.scroll + SCROLL_STEP, max_y)
+        
+    
+    def draw(self,canvas):
+        for cmd in self.display_list:
+            if cmd.top > self.scroll + HEIGHT - CHROME_PX: continue
+            if cmd.bottom < self.scroll: continue
+            cmd.execute(self.scroll- CHROME_PX, canvas)
+        
+        if self.focus:
+            obj = [obj for obj in tree_to_list(self.document, [])
+                   if obj.node == self.focus][0]
+            text = self.focus.attributes.get("value", "")
+            x = obj.x + obj.font.measure(text)
+            y = obj.y - self.scroll + CHROME_PX
+            canvas.create_line(x, y, x, y + obj.height)
+    
+
+    def allowed_request(self, url):
+        return self.allowed_origins == None or \
+            url_origin(url) in self.allowed_origins
+    
+    def load(self,hostname,body=None):
+        self.history.append(hostname)
+        headers,body = request(hostname,self.url,body)
+
+        # Content Security Policy (CSP) : to prevent browser from loading CSS, JS from disallowed sources
+        # Content-Security-Policy: default-src http://example.org
+        self.allowed_origins = None
+        if "content-security-policy" in headers:
+            csp = headers["content-security-policy"].split()
+            if len(csp) > 0 and csp[0] == "default-src":
+                # get the list of urls which are allowed
+                self.allowed_origins = csp[1:]
+
         self.nodes = HTMLParser(body).parse()
+        self.scroll = 0
         # copy() function creates a shallow copy
-        rules = self.default_style_sheet.copy()
+        self.rules = self.default_style_sheet.copy()
         self.url = hostname
         # browser will have to find the link for the sheets <link rel="stylesheet" href="/main.css"> and apply them
         links = [node.attributes["href"]
@@ -677,20 +798,160 @@ class Browser:
              and node.tag == "link"
              and "href" in node.attributes
              and node.attributes.get("rel") == "stylesheet"]
-
+        # load all the sources of the javsacripts for the attribute script
+       
         for link in links:
+            css_url = resolve_url(link, hostname)
+            print("Heyaaaa")
+            print(link,css_url)
+            if not self.allowed_request(css_url):
+                print("Blocked script", link, "due to CSP")
+                continue
             try:
-                header, body = request(resolve_url(link, hostname))
+                header, body = request(css_url, hostname)
             except:
                 continue
-        rules.extend(CSSParser(body).parse())
-        style(self.nodes,sorted(rules, key=cascade_priority))
+            self.rules.extend(CSSParser(body).parse())
+        self.render()
+
+
+        
+    def render(self):
+        style(self.nodes,sorted(self.rules, key=cascade_priority))
         #print_tree(self.nodes)
         self.document =  DocumentLayout(self.nodes)
         self.document.layout()
         self.display_list = []
         self.document.paint(self.display_list)
+
+class Browser:
+    def __init__(self):
+        # creates a window
+        # window -- where the canvas will be displayed
+        self.window = tkinter.Tk()
+        # to create canvas inside the window (specifications)
+        self.canvas = tkinter.Canvas(self.window, width=WIDTH,height=HEIGHT,bg="white")
+        # to position canvas inside window
+        self.canvas.pack()
+        self.scroll = 0
+        # self.scrolldown --> event handler, called when down key is pressed
+        # we are binding a function to a key (Tk allows us to do that)
+        self.window.bind("<Down>", self.handle_scrolldown)
+        # left click bind
+        self.window.bind("<Button-1>", self.handle_click)
+        # binding each key press
+        self.window.bind("<Key>", self.handle_key)
+        # handling enter
+        self.window.bind("<Return>", self.handle_enter)
+        self.display_list = []
+        self.url = None
+        self.tabs = []
+        self.active_tab = None
+        self.focus = None
+        self.address_bar = ""
+        #self.window.bind("<MouseWheel>",self.on_mousewheel)
+        # weight = bold, slant =italics
+    
+
+    def handle_scrolldown(self,eventobject):
+        self.tabs[self.active_tab].scrolldown()
+        #max_y = self.document.height - HEIGHT
+        #self.scroll = min(self.scroll + SCROLL_STEP, max_y)
         self.draw()
+
+    # event handler is passed an event object
+    def handle_click(self, e):
+        self.focus = None
+        if e.y < CHROME_PX:
+            self.focus = None
+            if 40 <= e.x < 40 + 80 * len(self.tabs) and 0 <= e.y < 40:
+                self.active_tab = int((e.x - 40) / 80)
+            elif 10 <= e.x < 30 and 10 <= e.y < 30:
+                self.load("https://browser.engineering/")
+            elif 10 <= e.x < 35 and 40 <= e.y < 90: # handling clicking on the arrow
+                self.tabs[self.active_tab].go_back()
+            elif 50 <= e.x < WIDTH - 10 and 40 <= e.y < 90: # setting the address bar
+                self.focus = "address bar"
+                self.address_bar = ""
+        else:
+            self.focus = "content"
+            self.tabs[self.active_tab].click(e.x, e.y - CHROME_PX)
+        
+        self.draw()
+
+    def handle_key(self,e):
+        # char - character user typed; ignore which don't include chars
+        if len(e.char) == 0: return
+        # checking the range
+        if not (0x20 <= ord(e.char) < 0x7f): return
+        if self.focus == "address bar":
+            self.address_bar += e.char
+            self.draw()
+        elif self.focus == "content":
+            self.tabs[self.active_tab].keypress(e.char)
+            self.draw()
+
+
+    def handle_enter(self, e):
+        if self.focus == "address bar":
+            self.tabs[self.active_tab].load(self.address_bar)
+            self.focus = None
+            self.draw()
+
+    # rendering function
+    def draw(self): 
+        # draw is invoked each time we scroll; thus when we scroll the old text overlaps over the new one
+        # thus we delete the previous text before we show the new one
+        self.canvas.delete("all")
+        self.tabs[self.active_tab].draw(self.canvas)
+        self.canvas.create_rectangle(0, 0, WIDTH, CHROME_PX,fill="white", outline="black")
+        tabfont = get_font(20, "normal", "roman")
+        # padding to create space for each tab 
+        for i, tab in enumerate(self.tabs):
+            name = "Tab {}".format(i+1)
+            x1, x2 = 40 + 80 * i, 120 + 80 * i
+            # creating a border for the page; left and right
+            self.canvas.create_line(x1, 0, x1, 40, fill="black")
+            self.canvas.create_line(x2, 0, x2, 40, fill="black")
+            # draw the tab name
+            self.canvas.create_text(x1 + 10, 10, anchor="nw", text=name, font=tabfont, fill="black")
+            # specially mark it as active
+            if i == self.active_tab:
+                self.canvas.create_line(0, 40, x1, 40, fill="black")
+                self.canvas.create_line(x2, 40, WIDTH, 40, fill="black")
+
+        # drawing the Tab area 
+        buttonfont = get_font(30, "normal", "roman")
+        self.canvas.create_rectangle(10, 10, 30, 30,outline="black", width=1)
+        self.canvas.create_text(11, 0, anchor="nw", text="+",font=buttonfont, fill="black")
+
+        # displaying the URL in the tab
+        self.canvas.create_rectangle(40, 50, WIDTH - 10, 90,outline="black", width=1)
+        url = self.tabs[self.active_tab].url
+        self.canvas.create_text(55, 55, anchor='nw', text=url,font=buttonfont, fill="black")
+
+        # creating the back button 
+        self.canvas.create_rectangle(10, 50, 35, 90,outline="black", width=1)
+        self.canvas.create_polygon(15, 70, 30, 55, 30, 85, fill='black')
+
+
+        if self.focus == "address bar":
+            self.canvas.create_text(55, 55, anchor='nw', text=self.address_bar,font=buttonfont, fill="black")
+            w = buttonfont.measure(self.address_bar)
+            self.canvas.create_line(55 + w, 55, 55 + w, 85, fill="black")
+        else:
+            url = self.tabs[self.active_tab].url
+            self.canvas.create_text(55, 55, anchor='nw', text=url,font=buttonfont, fill="black")
+            
+
+    
+    def load(self, url):
+        new_tab = Tab()
+        new_tab.load(url)
+        self.active_tab = len(self.tabs)
+        self.tabs.append(new_tab)
+        self.draw()
+        
 
 # distinguish if the Element requires BlockLayout or InilineLayout (text) for layout
 def layout_mode(node):
@@ -723,12 +984,14 @@ def get_font(size, weight, slant):
         FONTS[key] = font
     return FONTS[key]
             
-def request(hostname):
+def request(hostname,top_level_url,payload=None):
     scheme, hostname = hostname.split("://", 1)
 
     if "/" in hostname:
         hostname,path = hostname.split("/",1)
         path = "/" + path
+
+    
     
     s = socket.socket(
         family = socket.AF_INET,
@@ -740,15 +1003,36 @@ def request(hostname):
         hostname, port = hostname.split(":", 1)
         port = int(port)
     s.connect((hostname,port)) 
+    method = "POST" if payload else "GET"
     # sending request to the site 
-    request_ = b"GET "+ (path).encode() + b" HTTP/1.0\r\n" + b"Host: "+ (hostname).encode() + b"\r\n\r\n"
-    s.send(request_)
+    request_ = (method)+ " "+(path) + " HTTP/1.0\r\n" + "Host: "+ (hostname) + "\r\n"
+    print(request_)
+    
+    if hostname in COOKIE_JAR:            
+        cookie,params = COOKIE_JAR[hostname]
+        allow_cookie = True
+        if top_level_url and params.get("samesite", "none") == "lax":
+            _, _, top_level_host, _ = top_level_url.split("/", 3)
+            allow_cookie = (hostname == top_level_host or method == "GET")
+        if allow_cookie:
+            request_ += "Cookie: {}\r\n".format(cookie)
+
+
+    
+    
+    if payload:
+        length = len(payload.encode("utf8"))
+        request_ += "Content-Length: {}\r\n".format(length)
+        request_ += "\r\n" + (payload)
+    request_ += "\r\n"
+    s.send((request_).encode("utf-8"))
 
     # parsing the response
     # making a makefile object (fn of sockets) to receive the objects easily?
     response = s.makefile("r", encoding="utf8", newline="\r\n")
     statusline = response.readline()
-    version,status,code = statusline.split(' ')
+    print(statusline,hostname)
+    version,status,code = statusline.split(' ',2)
 # assert the status code, print the error message if not right
     assert status == "200", "Got {}: {}".format(status,code)
     headers = {}
@@ -758,9 +1042,26 @@ def request(hostname):
         if line == "\r\n": break
         header, value = line.split(":", 1)
         headers[header.lower()] = value.strip()
+   
+    # on a new login for instance the server sends a new cookie value to be set 
+    # Set-Cookie: foo=bar; SameSite=Lax
+    if "set-cookie" in headers:
+        params = {}
+        if ";" in headers["set-cookie"]:
+            cookie, rest = headers["set-cookie"].split(";", 1)
+            for param_pair in rest.split(";"):
+                name, value = param_pair.strip().split("=", 1)
+                params[name.lower()] = value.lower()
+        else:
+            cookie = headers["set-cookie"]
+        COOKIE_JAR[hostname] = (cookie, params)
     body = response.read()
     s.close()
     return headers,body
+
+def url_origin(url):
+    scheme_colon, _, host, _ = url.split("/", 3)
+    return scheme_colon + "//" + host
 
 def style(node,rules):
     node.style = {}
@@ -782,7 +1083,8 @@ def style(node,rules):
     if isinstance(node, Element) and "style" in node.attributes:
         pairs = CSSParser(node.attributes["style"]).body()
         for property, value in pairs.items():
-            node.style[property] = value
+            computed_value = compute_style(node, property, value)
+            node.style[property] = computed_value
 
     for child in node.children:
         style(child,rules)
