@@ -1,2 +1,2 @@
 # Browser-Engineering-Implementation
-My custom implementation of the toy browser as explained in https://browser.engineering/
+Practice implementation of the toy browser as explained step by step in https://browser.engineering/ .
